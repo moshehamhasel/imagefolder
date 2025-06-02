@@ -16,7 +16,6 @@ type ImageData struct {
 	Images []string
 }
 
-
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: go run main.go <folder>")
@@ -26,7 +25,6 @@ func main() {
 	rootFolder := os.Args[1]
 
 	err := filepath.Walk(rootFolder, func(path string, info os.FileInfo, err error) error {
-
 		if err != nil {
 			return err
 		}
@@ -38,9 +36,6 @@ func main() {
 			return nil // Skip processing the root folder itself
 		}
 		if info.IsDir() {
-			dirName := filepath.Base(path)
-			fmt.Printf("processing %v - %v\n", path, dirName)
-
 			return processSubFolder(path)
 		}
 
@@ -60,16 +55,36 @@ func getImagesInOrder(subFolder string) ([]string, error) {
 
 	images := make(map[int][]string)
 	for _, file := range files {
+		// Skip __MACOSX folders and files
+		if strings.Contains(file.Name(), "__MACOSX") {
+			continue
+		}
+		
 		if !file.IsDir() && isImageFile(file.Name()) {
 			num := extractNumber(file.Name())
-			// fmt.Printf("found file %v with number %v\n", file.Name(), num)
+			// Store just the filename for images in current directory
 			images[num] = append(images[num], file.Name())
 		}
 		if file.IsDir() {
 			subDirPath := filepath.Join(subFolder, file.Name())
-			subDirImages, _ := getImagesInOrder(subDirPath)
+			
+			// Skip __MACOSX directories
+			if strings.Contains(subDirPath, "__MACOSX") {
+				continue
+			}
+			
+			subDirImages, err := getImagesInOrder(subDirPath)
+			if err != nil {
+				continue // Skip directories with errors
+			}
+			
 			subDirNum := extractNumber(file.Name())
-			images[subDirNum] = append(images[subDirNum], subDirImages...)
+			
+			// Prepend subdirectory name to each image path
+			for _, img := range subDirImages {
+				fullPath := filepath.Join(file.Name(), img)
+				images[subDirNum] = append(images[subDirNum], fullPath)
+			}
 		}
 	}
 
@@ -79,7 +94,6 @@ func getImagesInOrder(subFolder string) ([]string, error) {
 
 	return nil, nil
 }
-
 
 func processSubFolder(subFolder string) error {
 	images, err := getImagesInOrder(subFolder)
@@ -104,7 +118,6 @@ func orderImages(imageMap map[int][]string) []string {
 	return orderedImages
 }
 
-
 func isImageFile(filename string) bool {
 	ext := strings.ToLower(filepath.Ext(filename))
 	return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif"
@@ -123,30 +136,112 @@ func extractNumber(filename string) int {
 	return 0
 }
 
+// ImageInfo holds both the path and filename for template rendering
+type ImageInfo struct {
+	Path     string
+	Filename string
+}
+
 func createHTML(subFolder string, images []string) error {
-	data := ImageData{Images: images}
-	tmpl := template.Must(template.New("image").Parse(`{{range .Images}}<div style="max-width:900px; max-height:630px;"><img src="{{.}}" style="max-width: 100%; height: auto;" title="{{.}}" alt="{{.}}"></div>{{end}}`))
-
-	for i, img := range data.Images {
+	// Convert images to ImageInfo structs for better template control
+	var imageInfos []ImageInfo
+	
+	// Create the HTML file path
+	htmlFileName := filepath.Join(filepath.Dir(subFolder), filepath.Base(subFolder)+".html")
+	
+	for _, img := range images {
+		// The image path is already relative to subFolder from getImagesInOrder
 		fullImagePath := filepath.Join(subFolder, img)
-
-		relativePath, err := filepath.Rel(filepath.Dir(filepath.Join(filepath.Dir(subFolder), filepath.Base(subFolder)+".html")), fullImagePath)
-
-
+		
+		// Calculate relative path from HTML file location to image
+		relativePath, err := filepath.Rel(filepath.Dir(htmlFileName), fullImagePath)
 		if err != nil {
-			fmt.Printf("Error calculating relative path: %v\n", err)
+			continue
 		}
-		fmt.Printf("createHTML: relativePath = %v\n", relativePath)
-		data.Images[i] = filepath.ToSlash(relativePath) // Ensure path uses forward slashes for web compatibility
+		
+		// Extract just the filename for title/alt attributes
+		filename := filepath.Base(img)
+		
+		imageInfos = append(imageInfos, ImageInfo{
+			Path:     filepath.ToSlash(relativePath), // Ensure path uses forward slashes for web compatibility
+			Filename: filename,
+		})
 	}
 
-	htmlFileName := filepath.Join(filepath.Dir(subFolder), filepath.Base(subFolder)+".html")
+	// Updated template with CSS for PDF printing - one image per page
+	tmpl := template.Must(template.New("image").Parse(`<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Image Gallery</title>
+    <style>
+        @page {
+            margin: 0.5in;
+            size: A4;
+        }
+        
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+        
+        .image-container {
+            page-break-after: always;
+            page-break-inside: avoid;
+            width: 100%;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            box-sizing: border-box;
+        }
+        
+        .image-container:last-child {
+            page-break-after: avoid;
+        }
+        
+        .image-container img {
+            max-width: 100%;
+            max-height: 90vh;
+            object-fit: contain;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        .image-title {
+            margin-top: 10px;
+            text-align: center;
+            font-size: 12px;
+            color: #666;
+        }
+        
+        @media print {
+            .image-container {
+                height: 100vh;
+                page-break-after: always;
+                page-break-inside: avoid;
+            }
+            
+            .image-container img {
+                max-height: 95vh;
+            }
+        }
+    </style>
+</head>
+<body>
+    {{range .}}<div class="image-container">
+        <img src="{{.Path}}" title="{{.Filename}}" alt="{{.Filename}}">
+        <div class="image-title">{{.Filename}}</div>
+    </div>{{end}}
+</body>
+</html>`))
+
 	f, err := os.Create(htmlFileName)
 	if err != nil {
 		return err
 	}
-	// fmt.Printf("creating %v\n", htmlFileName)
 	defer f.Close()
-	return tmpl.Execute(f, data)
+	
+	return tmpl.Execute(f, imageInfos)
 }
-
